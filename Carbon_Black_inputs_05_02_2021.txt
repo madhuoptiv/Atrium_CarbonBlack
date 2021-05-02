@@ -1,0 +1,17 @@
+Carbon Black inputs:
+
+u_phone_number : 704-355-2000
+assignment_group_Charlotte : 8916fb8c0f80b500690cf08ce1050ed5
+assignment_group_Macon : de9f84431b9de8909eeaedf5624bcb65
+assignment_group_OptivAFC : c9aed206db482810e9622b35ca96194b
+contact_type : Phone
+category : Security
+subcategory : IS Security
+state : 1
+urgency : 3
+impact : 3
+snow_username : service-swimlane
+snow_passwd : SwimL@n3SN!
+location : NO FACILITY AVAILABLE
+caller_id : Swimlane Service
+cmdb_ci : Not Listed Item

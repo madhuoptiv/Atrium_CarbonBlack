@@ -1,0 +1,455 @@
+#To create record of the Carbon Black Alerts
+#Duplication check for the last 24 hours
+#Create Incident
+#Update Incident when duplicate obtained within 24 hours
+
+
+from re import search
+from collections import MutableMapping 
+from swimlane import Swimlane
+from datetime import datetime
+import time
+import requests
+import json
+import pysnow
+#import datetime
+requests.packages.urllib3.disable_warnings()
+
+#Inputs for the Servicenow Fields
+caller_id = sw_context.inputs['caller_id']
+u_phone_number = sw_context.inputs['u_phone_number']
+category = sw_context.inputs['category']
+subcategory = sw_context.inputs['subcategory']
+contact_type = sw_context.inputs['contact_type']
+assignment_group = sw_context.inputs['assignment_group_OptivAFC']
+state = sw_context.inputs['state']
+urgency = sw_context.inputs['urgency']
+impact = sw_context.inputs['impact']
+snow_username = sw_context.inputs['snow_username']
+snow_passwd = sw_context.inputs['snow_passwd']
+location= sw_context.inputs['location']
+cmdb_ci = sw_context.inputs['cmdb_ci']
+  
+#Method for for nested dicticonary to flatten dictionary
+def convert_flatten(d, parent_key =''): 
+    items = [] 
+    for k, v in d.items(): 
+        new_key = k
+        if isinstance(v, MutableMapping): 
+            items.extend(convert_flatten(v, new_key).items()) 
+        else: 
+            items.append((new_key, v)) 
+    return dict(items)  
+
+#Method for Time Format
+def convert(second): 
+    days = second // (60 * 60 * 24)
+    seconds = second % (24 * 3600) 
+    hour = seconds // 3600
+    seconds %= 3600
+    minutes = seconds // 60
+    seconds %= 60
+      
+    return "%d , %d:%02d:%02d" % (days ,hour, minutes, seconds)
+
+#Method for string to list 
+def Convert(string): 
+    li = list(string.split('] [')) 
+    return li
+  
+#VT_Hash Reputation
+
+def virus_total_hash_reputation(hashresource):
+  try:
+    url = 'https://www.virustotal.com/vtapi/v2/file/report'
+    params = {'apikey': '145d3687b74eee40def51cbceac6ea2ecc6f435d6e9b7655f864bf2f7c4fb4f1', 'resource': str(hashresource)}
+    Engine_name = []
+    response = requests.get(url, params=params)
+    hash_data = response.json()
+    search_engine_details =hash_data['scans']
+    #To Identify which specific Engine has detected the IP as malicious  
+    for search_engine, search_engine_info in search_engine_details.items():
+      if search_engine_info['result'] == None:
+        continue
+      else:  
+        Engine_name.append(search_engine)   
+    if len(Engine_name) !=0:
+      print(len(Engine_name))
+      Engine_name_list = str(Engine_name)[1:-1] 
+      VT_Hash_Result = "VT Hash Analysis: " + str(len(Engine_name)) + " engine detected this hash." + "\n" + "Detected Engine: " + str(Engine_name_list)
+    else:
+      VT_Hash_Result= "VT Hash Analysis: No engine detected this hash"
+    #print(VT_Hash_Result)
+    Hash_reputation_result ="""
+        Virus Total Hash Reputation Analysis:
+        --------------------------------
+        *Hash : {0}
+        *Scan_date : {1}
+        *Positives :  {2}
+        *VT Hash Analysis : 
+         {3}
+  
+        *Permalink: {4}
+    """.format(hash_data['resource'], hash_data['scan_date'] , hash_data['positives'] , VT_Hash_Result , hash_data['permalink']) 
+  except:
+    Hash_reputation_result = 'Hash_reputation_result cannot be performed due to limitation in public API Key'
+  return Hash_reputation_result
+
+sha256Hash_list = []
+#CB notification data
+url = "https://defense-prod05.conferdeploy.net/integrationServices/v3/notification"
+payload={}
+headers = {
+  'X-Auth-Token': 'AKPPWV5CJ37M4W3VVY9824D9/3A1Z9TF2YJ'
+}
+response = requests.request("GET", url, headers=headers, data=payload)
+total_data = response.text
+#print(type(total_data))
+print(total_data)
+#Test data
+
+datasheet = json.loads(total_data)
+  
+#Swimlane Configuration
+swimlane = Swimlane(sw_context.config['InternalSwimlaneUrl'], 'admin', 'Atr1um0p202Ot1v5w!', verify_ssl=False)
+
+app = swimlane.apps.get(name='CB_All_Alerts')
+# Create client object
+c = pysnow.Client(instance='atriumhealth', user=snow_username, password=snow_passwd)
+# Defining incident table API resource
+incident = c.resource(api_path='/v1/table/incident')
+#Retrieving the data and creating record for each Incident ID
+notification_data = datasheet["notifications"]
+applicationName = list()
+indicatorName = list()
+sha256Hash = list()
+
+for i in range(len(notification_data)):
+  create_record = app.records.create()
+  assert create_record
+  create_record['response_data'] = str(total_data)
+  create_record.save()
+  flatten_notification_data = convert_flatten(notification_data[i]) 
+  if flatten_notification_data["indicators"]:
+    for temp in flatten_notification_data["indicators"]:
+      applicationName.append(temp["applicationName"])
+      applicationName = list(set(applicationName))
+      indicatorName.append(temp["indicatorName"])
+      indicatorName = list(set(indicatorName))
+      sha256Hash.append(temp["sha256Hash"])
+      sha256Hash = list(set(sha256Hash))
+      create_record["applicationName"] = str(applicationName)
+      create_record.save()
+      create_record["indicatorName"] = str(indicatorName)
+      create_record.save()
+      create_record["sha256Hash"] = str(sha256Hash)
+      create_record.save()  
+  
+  if flatten_notification_data["eventDescription"]:
+    event_description = flatten_notification_data["eventDescription"]
+    listdata = Convert(event_description)
+    modified_event = listdata[1] + " " +listdata[2]
+    create_record["eventDescription"] = str(modified_event)
+    create_record.save()
+    
+  for record in create_record:
+    for keys in flatten_notification_data.keys():
+      if record[0] == keys:
+        if record[0] == "eventDescription":
+          continue
+        get = record[0]
+        create_record[get] = flatten_notification_data[keys]
+        create_record.save()
+  
+#ATD Calculation: Difference in Eventtime and Alert captured in Swimlane
+  for records in create_record:
+    if records[0]=="eventTime" and records[1] is not None:
+      get= records[1]
+      format_str = '%m/%d/%Y %H:%M:%S'
+      now = datetime.now().strftime('%m/%d/%Y %H:%M:%S')
+      stripnow = datetime.strptime(now, format_str)
+      create_record["trackingTime"] = str(stripnow)
+      create_record.save()
+      eventtime =time.strftime('%m/%d/%Y %H:%M:%S', time.gmtime(get/1000.))
+      striptime = datetime.strptime(eventtime, format_str)
+      create_record["eventTime_display"] = str(striptime)
+      difference=stripnow-striptime
+      atd_seconds = int(difference.total_seconds())
+      atd_minutes = atd_seconds // 60       
+      ATD=convert(atd_seconds)
+      print(ATD)
+      create_record["ATD"] = ATD
+      create_record.save()
+      create_record["ATD-seconds"] =str(atd_seconds)
+      create_record.save()
+      create_record["ATD-minutes"] =str(atd_minutes)
+      create_record.save()      
+#Duplication Check      
+  Search_field =  create_record["incidentId"]  
+  search_records = app.records.search(('incidentId', 'equals', Search_field))
+  duplicate_count = len(search_records)
+   
+  if duplicate_count == 1:    #Create servicenow Incident
+    values=[]
+    keys=[]
+    for records in create_record:
+      if records[0] and records[1] is not None:
+        if records[0] and records[1] != "":
+          if records[0] == "Tracking Id":
+            continue
+          if records[0] == "ATD":
+            continue
+          if records[0] == "ATD-seconds":
+            continue       
+          if records[0] == "response_data":
+            continue    
+          if records[0] == "ATD-minutes":
+            continue              
+          keys.append(records[0])
+          values.append(records[1])
+    res = [str(keys[i]) +' : ' + str(values[i]) for i in range(len(keys))] 
+    Snow_string = ('\n'.join(map(str, res)))        
+    work_notes = """
+    ********************************
+    Carbon Black Alert Details:
+    ********************************
+    {0}
+    """.format(Snow_string )
+    devicename = create_record['deviceName']
+    groupName = create_record['groupName']    
+    short_description = "Carbon Black Alert - " + "Devicename: " + devicename + " " + "GroupName: " + groupName + "" 
+    sha256Hash = create_record['sha256Hash']
+    sha256Hash = sha256Hash.replace("'", "")
+    sha256Hash = sha256Hash.replace("[", "")
+    sha256Hash = sha256Hash.replace("]", "")
+    substring = ","
+    endstring = ''
+    if search(substring, sha256Hash):
+      sha256Hash_list = list(sha256Hash.split(","))
+      for iterating_hash in sha256Hash_list:
+        hashresource = iterating_hash
+        vt_hash_reputation_result = virus_total_hash_reputation(hashresource)
+        endstring += vt_hash_reputation_result
+        print(endstring)
+        app.records.bulk_modify(create_record, values={'vt_hash':endstring})
+    else:
+      vt_hash_reputation_result = virus_total_hash_reputation(sha256Hash)
+      print(vt_hash_reputation_result)
+      app.records.bulk_modify(create_record, values={'vt_hash':vt_hash_reputation_result})
+    hash_result = create_record['vt_hash']
+    new_work_notes = str(work_notes) + str(hash_result)
+    time_to_detect = create_record['ATD-minutes']
+    print(time_to_detect)
+# Set the payload for creating servicenow ticket
+    new_record = {
+    			'work_notes': new_work_notes,  
+                'short_description': short_description,
+                'u_phone_number' : u_phone_number,
+                'category' : category,
+                'subcategory' : subcategory,
+                'Contact type' : contact_type,
+                'assignment_group' : assignment_group,
+  				'state' : state,
+                'urgency' : urgency,
+                'impact' : impact,
+                'caller_id' : caller_id,
+                'location' : location,
+                'cmdb_ci' : cmdb_ci,
+                'u_time_detect_ack' : str(time_to_detect)       
+    }
+    deviceId = create_record['deviceId']
+    deviceId = str(deviceId)
+    deviceName = create_record['deviceName']
+    if deviceName == 'OMNIWRX' and deviceId == '28192881':
+      create_record['Updated_worknotes'] = 'FP alerts'
+      create_record.save()
+    elif deviceName == 'INTERNET\dcr-fsp-04' and deviceId == '27713302' :
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()  
+    elif deviceName == 'INTERNET\dcr-fsp-03' and deviceId == '27713309' :
+      create_record['Updated_worknotes'] = 'FP alerts'  
+      create_record.save()   
+    elif deviceName == 'INTERNET\dcr-fsp-02' and deviceId == '27713311' :
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()  
+    elif deviceName == 'INTERNET\dcr-fsp-01' and deviceId == '27713321' :
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()          
+    elif deviceName == 'CHSAZUREPRDORG\AH-PROD-O-ATH1' and deviceId == '40533735' :
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()          
+    elif deviceName == 'CAROLINAS\dcr-sql-ms-12' and deviceId == '28192941' :
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()          
+    elif deviceName == 'CAROLINAS\dcr-mhemo-ms-1' and deviceId == '28132316' :
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()          
+    elif deviceName == 'CAROLINAS\dcr-tcd-ms-02' and deviceId == '28192889' :
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()          
+    elif deviceName == 'CHSAZUREPRDORG\AH-PROD-O-CD2' and deviceId == '40533712' :
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()          
+    elif deviceName == 'CAROLINAS\dcr-crmcr5-ms4' and deviceId == '28062392' : 
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()           
+    elif deviceName == 'INTERNET\shs-dac-aht-003' and deviceId == '27776918' : 
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()        
+    elif deviceName == 'CAROLINAS\dcr-mcas-ms-v1' and deviceId == '28132384' :
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()       
+    elif deviceName == 'CAROLINAS\dcr-cmcr5-ms4' and deviceId == '28062388' :
+      create_record['Updated_worknotes'] = 'FP alerts' 
+      create_record.save()       
+    else:
+      print('create incident')  ## Create a new incident record
+      result = incident.create(payload=new_record)
+      ticket_data = result.all()
+      print(ticket_data[0]['number'])
+      print(ticket_data[0]['sys_id'])
+      print(ticket_data[0]['sys_created_on'])
+      number = ticket_data[0]['number']
+      sys_id = ticket_data[0]['sys_id']
+      app.records.bulk_modify(create_record, values={'work_notes': new_work_notes,'time_to_detect' : str(time_to_detect),'cmdb_ci' : cmdb_ci ,'caller_id': caller_id,'short_description': short_description, 'u_phone_number' : u_phone_number, 'category' : category, 'subcategory' : subcategory, 'contact_type' : contact_type, 'assignment_group' : assignment_group , 'state' : state, 'urgency' : urgency,  'impact' : impact , 'number' : number, 'sys_id' : sys_id , 'location' : location}) 
+    #, 'number' : number, 'sys_id' : sys_id
+#When duplicate alarm obtained  
+  if duplicate_count > 1: 
+    latest_duplicate_trackingTime  = create_record["trackingTime"]
+    #print(latest_duplicate_eventTime )
+    rec_id = str(search_records[0])  #Track the record ID of previous event
+    #print(rec_id)
+    tracking_eventtime_record = app.records.get(tracking_id=rec_id)
+    assert tracking_eventtime_record
+    previous_eventTime = tracking_eventtime_record["eventTime"]
+    previous_trackingTime = tracking_eventtime_record["trackingTime"]
+    previous_event_Ticket_Number = tracking_eventtime_record["number"]
+    previous_actor = tracking_eventtime_record["actor"]
+    previous_deviceId = tracking_eventtime_record["deviceId"]
+    #print(previous_eventTime)
+    datetimeFormat = '%Y-%m-%d %H:%M:%S'
+    striptimenew = datetime.strptime(latest_duplicate_trackingTime, datetimeFormat)
+    striptimeprevious = datetime.strptime(previous_trackingTime ,datetimeFormat)
+    diff = datetime.strptime(str(striptimenew), datetimeFormat) - datetime.strptime(str(striptimeprevious), datetimeFormat)
+    deadline_time = diff.total_seconds()
+    print(int(deadline_time))
+    per_day_seconds = 86400
+#If difference less than 24hours update Incident , else create new ticket    
+    if deadline_time < per_day_seconds:   
+      incidentid = create_record["incidentId"]
+      current_actor = create_record["actor"]
+      current_deviceId = create_record["deviceId"]
+      if (str(previous_actor) == str(current_actor)) and (str(previous_deviceId) == str(current_deviceId)): #checking for duplicate #update in record that its duplicate
+        app.records.bulk_modify(create_record, values={'Updated_worknotes': "This is duplicate record. Occurred within 24 hours. Hence updating it.", 'lasttime' : str(previous_eventTime) })
+        #should be deleted further
+      else: #get the Incident and update in servicenow worknotes
+        work_notes = "NOTE: The event " + str(incidentid) + " has  occurred again within 24 hours,hence updating it. " 
+        update_record = {
+    			  'work_notes': work_notes
+                     }
+        update = {'work_notes': work_notes}
+        updated_record = incident.update(query={'number': previous_event_Ticket_Number}, payload=update)
+        #print(updated_record)
+      
+        app.records.bulk_modify(create_record, values={'Updated_worknotes': work_notes, 'lasttime' : str(previous_eventTime) ,  'number' : previous_event_Ticket_Number  })
+        #,  'number' : previous_event_Ticket_Number     
+    else:
+      devicename = create_record['deviceName']
+      groupName = create_record['groupName']    
+      short_description = "Carbon Black Alert - " + "Devicename: " + devicename + " " + "GroupName: " + groupName + "" 
+      values=[]
+      keys=[]
+      for records in create_record:
+        if records[0] and records[1] is not None:
+          if records[0] and records[1] != "":
+            if records[0] == "Tracking Id":
+              continue
+            if records[0] == "ATD":
+              continue
+            if records[0] == "ATD-seconds":
+              continue  
+            if records[0] == "response_data":
+              continue    
+            if records[0] == "ATD-minutes":
+              continue                
+            keys.append(records[0])
+            values.append(records[1])
+      res = [str(keys[i]) +' : ' + str(values[i]) for i in range(len(keys))] 
+      Snow_string = ('\n'.join(map(str, res)))        
+      work_notes = """
+      ********************************
+      Carbon Black Alert Details:
+      ********************************
+      {0}
+      """.format(Snow_string ) 
+      time_to_detect = create_record['ATD-seconds']
+      print(time_to_detect)      
+      new_record = {
+    			'work_notes': work_notes,  
+                'short_description': short_description,
+                'u_phone_number' : u_phone_number,
+                'category' : category,
+                'subcategory' : subcategory,
+                'Contact type' : contact_type,
+                'assignment_group' : assignment_group,
+  				'state' : state,
+                'urgency' : urgency,
+                'impact' : impact,
+                'caller_id' : caller_id,
+                'location' : location,
+                'cmdb_ci' : cmdb_ci,        
+                'u_time_detect_ack' : str(time_to_detect)          
+                   } 
+      #app.records.bulk_modify(create_record, values={'work_notes': work_notes,'short_description': short_description, 'u_phone_number' : u_phone_number, 'category' : category, 'subcategory' : subcategory, 'contact_type' : contact_type, 'assignment_group' : assignment_group , 'state' : state, 'urgency' : urgency,  'impact' : impact }) 
+      if deviceName == 'OMNIWRX' and deviceId == '28192881':
+        create_record['Updated_worknotes'] = 'FP alerts'
+        create_record.save()
+      elif deviceName == 'INTERNET\dcr-fsp-04' and deviceId == '27713302' :
+        create_record['Updated_worknotes'] = 'FP alerts' 
+        create_record.save()  
+      elif deviceName == 'INTERNET\dcr-fsp-03' and deviceId == '27713309' :
+        create_record['Updated_worknotes'] = 'FP alerts'  
+        create_record.save()   
+      elif deviceName == 'INTERNET\dcr-fsp-02' and deviceId == '27713311' :
+        create_record['Updated_worknotes'] = 'FP alerts' 
+        create_record.save()  
+      elif deviceName == 'INTERNET\dcr-fsp-01' and deviceId == '27713321' :
+        create_record['Updated_worknotes'] = 'FP alerts' 
+        create_record.save()          
+      elif deviceName == 'CHSAZUREPRDORG\AH-PROD-O-ATH1' and deviceId == '40533735' :
+        create_record['Updated_worknotes'] = 'FP alerts' 
+        create_record.save()          
+      elif deviceName == 'CAROLINAS\dcr-sql-ms-12' and deviceId == '28192941' :
+        create_record['Updated_worknotes'] = 'FP alerts' 
+        create_record.save()          
+      elif deviceName == 'CAROLINAS\dcr-mhemo-ms-1' and deviceId == '28132316' :
+        create_record['Updated_worknotes'] = 'FP alerts' 
+        create_record.save()          
+      elif deviceName == 'CAROLINAS\dcr-tcd-ms-02' and deviceId == '28192889' :
+        create_record['Updated_worknotes'] = 'FP alerts' 
+        create_record.save()          
+      elif deviceName == 'CHSAZUREPRDORG\AH-PROD-O-CD2' and deviceId == '40533712' :
+        create_record['Updated_worknotes'] = 'FP alerts' 
+        create_record.save()          
+      elif deviceName == 'CAROLINAS\dcr-crmcr5-ms4' and deviceId == '28062392' : 
+        create_record['Updated_worknotes'] = 'FP alerts' 
+        create_record.save()           
+      elif deviceName == 'INTERNET\shs-dac-aht-003' and deviceId == '27776918' : 
+        create_record['Updated_worknotes'] = 'FP alerts' 
+        create_record.save()        
+      elif deviceName == 'CAROLINAS\dcr-mcas-ms-v1' and deviceId == '28132384' :
+        create_record['Updated_worknotes'] = 'FP alerts' 
+        create_record.save()        
+      else:
+        print('create incident')       
+# Create a new incident record
+        result = incident.create(payload=new_record)
+        ticket_data = result.all()
+        print(ticket_data[0]['number'])
+        print(ticket_data[0]['sys_id'])
+        print(ticket_data[0]['sys_created_on'])
+        number = ticket_data[0]['number']
+        sys_id = ticket_data[0]['sys_id']
+        print(Snow_string)       
+        app.records.bulk_modify(create_record, values={'work_notes': work_notes,'time_to_detect' : str(time_to_detect),'cmdb_ci' : cmdb_ci ,'caller_id' : caller_id,'short_description': short_description, 'u_phone_number' : u_phone_number, 'category' : category, 'subcategory' : subcategory, 'contact_type' : contact_type, 'assignment_group' : assignment_group , 'state' : state, 'urgency' : urgency,  'impact' : impact  , 'number' : number , 'sys_id': sys_id ,'location':location }) 
+ #, 'number' : number , 'sys_id': sys_id  
