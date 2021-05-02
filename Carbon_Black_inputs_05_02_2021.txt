@@ -10,8 +10,8 @@ subcategory : IS Security
 state : 1
 urgency : 3
 impact : 3
-snow_username : service-swimlane
-snow_passwd : SwimL@n3SN!
+snow_username : *******
+snow_passwd : ********
 location : NO FACILITY AVAILABLE
 caller_id : Swimlane Service
 cmdb_ci : Not Listed Item
